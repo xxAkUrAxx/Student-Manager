@@ -21,14 +21,13 @@ namespace Student_Manager
         public Form1()
         {
             InitializeComponent();
+            ApplyModernTheme();
 
             this.Load += Form1_Load;
             OfficeOpenXml.ExcelPackage.LicenseContext = OfficeOpenXml.LicenseContext.NonCommercial;
             // Set ActiveLbl and InactiveLbl labels to invisible
             ActiveLbl.Visible = false;
             InactiveLbl.Visible = false;
-            // Subscribe to the TextChanged event of the SearchTextBox
-            SearchTextBox.TextChanged += SearchTextBox_TextChanged;
             // Initialize the timer
             InitializeTimer();
         }
@@ -58,36 +57,97 @@ namespace Student_Manager
             UpdateTimeLabel(); // Call UpdateTimeLabel during form load
             CustomizeColumnHeadersWrapMode(); // Apply customization for column headers wrap mode, alignment, and width
             dataGridView1.DataSource = dataTable;
-            SearchTextBox.TextChanged += SearchTextBox_TextChanged;
 
         }
 
         private Button selectedButton = null;
 
+        private void UnbookedStudentsButton_Click(object sender, EventArgs e)
+        {
+            Button clickedButton = (Button)sender;
+            if (selectedButton != clickedButton)
+            {
+                if (selectedButton != null)
+                {
+                    selectedButton.BackColor = SystemColors.Control;
+                }
+
+                clickedButton.BackColor = Color.Red;
+                selectedButton = clickedButton;
+            }
+
+            DataTable filteredDataTable = dataTable.Clone();
+            foreach (DataRow row in dataTable.Rows)
+            {
+                if (HasNoNextEncounter(row))
+                {
+                    filteredDataTable.ImportRow(row);
+                }
+            }
+
+            dataGridView1.DataSource = filteredDataTable;
+            dataGridView1.Refresh();
+        }
+
+        private static bool HasNoNextEncounter(DataRow row)
+        {
+            if (row == null || !row.Table.Columns.Contains("Next ENC") || row.IsNull("Next ENC"))
+            {
+                return true;
+            }
+
+            object value = row["Next ENC"];
+            if (value is DateTime)
+            {
+                return (DateTime)value == DateTime.MinValue;
+            }
+
+            DateTime parsedDate;
+            return string.IsNullOrWhiteSpace(Convert.ToString(value))
+                || !DateTime.TryParse(Convert.ToString(value), out parsedDate)
+                || parsedDate == DateTime.MinValue;
+        }
+
         private void fileselectbtn_Click(object sender, EventArgs e)
         {
             using (OpenFileDialog openFileDialog = new OpenFileDialog())
             {
-                openFileDialog.Filter = "Excel Files (*.xls)|*.xls";
-                if (openFileDialog.ShowDialog() == DialogResult.OK)
+                openFileDialog.Filter = "Excel workbooks (*.xls;*.xlsx)|*.xls;*.xlsx";
+                openFileDialog.Title = "Choose a student action list";
+                if (openFileDialog.ShowDialog(this) == DialogResult.OK)
                 {
                     string inputFilePath = openFileDialog.FileName;
-                    if (File.Exists(inputFilePath))
+                    try
                     {
-                        string outputFilePath = Path.ChangeExtension(inputFilePath, ".xlsx");
+                        UseWaitCursor = true;
+                        fileselectbtn.Enabled = false;
+                        selectedFileLbl.Text = "Loading " + Path.GetFileName(inputFilePath) + "...";
+                        Refresh();
 
-                        ConvertToXlsx(inputFilePath, outputFilePath);
-                        MessageBox.Show("Conversion complete!");
+                        if (!File.Exists(inputFilePath))
+                        {
+                            throw new FileNotFoundException("The selected file could not be found.", inputFilePath);
+                        }
 
-                        LoadDataFromExcel(outputFilePath);
+                        string workbookPath = inputFilePath;
+                        if (string.Equals(Path.GetExtension(inputFilePath), ".xls", StringComparison.OrdinalIgnoreCase))
+                        {
+                            workbookPath = Path.ChangeExtension(inputFilePath, ".xlsx");
+                            ConvertToXlsx(inputFilePath, workbookPath);
+                        }
 
-                        // Update the selected file label with file information
-                        string fileInfo = $"File selected: {Path.GetFileName(inputFilePath)}\nDate modified: {File.GetLastWriteTime(inputFilePath)}";
-                        MessageBox.Show(fileInfo);
+                        LoadDataFromExcel(workbookPath);
+                        selectedFileLbl.Text = Path.GetFileName(inputFilePath) + "  •  " + dataTable.Rows.Count + " students loaded";
                     }
-                    else
+                    catch (Exception ex)
                     {
-                        MessageBox.Show("Selected file does not exist.");
+                        selectedFileLbl.Text = "Import failed — choose another action list";
+                        MessageBox.Show(this, ex.Message, "Could not import action list", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                    finally
+                    {
+                        fileselectbtn.Enabled = true;
+                        UseWaitCursor = false;
                     }
                 }
             }
@@ -149,12 +209,12 @@ namespace Student_Manager
         {
             // Set ActiveLbl text to "Active Students:" in black color and make it visible
             ActiveLbl.Text = "Active Students:";
-            ActiveLbl.ForeColor = Color.Black;
+            ActiveLbl.ForeColor = MutedTextColor;
             ActiveLbl.Visible = true;
 
             // Set InactiveLbl text to "Inactive Students:" in black color and make it visible
             InactiveLbl.Text = "Inactive Students:";
-            InactiveLbl.ForeColor = Color.Black;
+            InactiveLbl.ForeColor = MutedTextColor;
             InactiveLbl.Visible = true;
 
             // Load data from Excel file
@@ -249,7 +309,7 @@ namespace Student_Manager
                     // Update ActiveLbl label with the count of active students in green font
                     int activeStudentsCount = activeRows.Count();
                     ActiveLbl.Text += $" {activeStudentsCount}";
-                    ActiveLbl.ForeColor = Color.Green; // Set font color to green
+                    ActiveLbl.ForeColor = ActiveGreen; // Set font color to green
 
                     // Filter the dataTable to show only rows where "Contract Status" is not "Active"
                     var inactiveRows = dataTable.AsEnumerable()
@@ -258,7 +318,7 @@ namespace Student_Manager
                     // Update InactiveLbl label with the count of inactive students in red font
                     int inactiveStudentsCount = inactiveRows.Count();
                     InactiveLbl.Text += $" {inactiveStudentsCount}";
-                    InactiveLbl.ForeColor = Color.Red; // Set font color to red
+                    InactiveLbl.ForeColor = ErrorRed; // Set font color to red
 
                     // Refresh the DataGridView
                     dataGridView1.Refresh();
@@ -279,11 +339,11 @@ namespace Student_Manager
 
             if (contractStatus.Equals("Active", StringComparison.OrdinalIgnoreCase))
             {
-                style.ForeColor = Color.Green;
+                style.ForeColor = ActiveGreen;
             }
             else if (contractStatus.Equals("InActive", StringComparison.OrdinalIgnoreCase))
             {
-                style.ForeColor = Color.Red;
+                style.ForeColor = ErrorRed;
             }
             else
             {
