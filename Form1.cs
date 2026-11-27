@@ -5,6 +5,7 @@ using NPOI.XSSF.UserModel;
 using OfficeOpenXml;
 using System;
 using System.Data;
+using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
@@ -22,6 +23,7 @@ namespace Student_Manager
         {
             InitializeComponent();
             ApplyModernTheme();
+            dataGridView1.CellDoubleClick += DataGridView1_CellDoubleClick;
 
             this.Load += Form1_Load;
             OfficeOpenXml.ExcelPackage.LicenseContext = OfficeOpenXml.LicenseContext.NonCommercial;
@@ -30,6 +32,69 @@ namespace Student_Manager
             InactiveLbl.Visible = false;
             // Initialize the timer
             InitializeTimer();
+        }
+
+        private void DataGridView1_CellDoubleClick(object sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex < 0 || e.ColumnIndex < 0)
+            {
+                return;
+            }
+
+            string columnName = dataGridView1.Columns[e.ColumnIndex].Name;
+            if (columnName != "First Name" &&
+                columnName != "Last Name" &&
+                columnName != "Phone Number")
+            {
+                return;
+            }
+
+            DataGridViewRow row = dataGridView1.Rows[e.RowIndex];
+            string phoneNumber = NormalizeWhatsAppPhoneNumber(
+                Convert.ToString(row.Cells["Phone Number"].Value));
+
+            if (string.IsNullOrWhiteSpace(phoneNumber))
+            {
+                MessageBox.Show(
+                    this,
+                    "This student does not have a phone number.",
+                    "Cannot open WhatsApp",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            try
+            {
+                Process.Start(new ProcessStartInfo("https://wa.me/" + phoneNumber)
+                {
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    this,
+                    "WhatsApp could not be opened. " + ex.Message,
+                    "Cannot open WhatsApp",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
+        private static string NormalizeWhatsAppPhoneNumber(string phoneNumber)
+        {
+            if (string.IsNullOrWhiteSpace(phoneNumber))
+            {
+                return string.Empty;
+            }
+
+            string digits = new string(phoneNumber.Where(character =>
+                character >= '0' && character <= '9').ToArray());
+
+            return digits.StartsWith("00", StringComparison.Ordinal)
+                ? digits.Substring(2)
+                : digits;
         }
 
         private void InitializeTimer()
