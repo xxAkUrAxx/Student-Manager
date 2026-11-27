@@ -1,15 +1,32 @@
 using System;
 using System.Diagnostics;
 using System.Drawing;
+using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Reflection;
-using System.Text.RegularExpressions;
+using System.Security.Cryptography;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Web.Script.Serialization;
 
 namespace Student_Manager
 {
+    internal sealed class GitHubReleaseInfo
+    {
+        public string tag_name { get; set; }
+        public string html_url { get; set; }
+        public GitHubReleaseAsset[] assets { get; set; }
+    }
+
+    internal sealed class GitHubReleaseAsset
+    {
+        public string name { get; set; }
+        public string browser_download_url { get; set; }
+        public string digest { get; set; }
+    }
+
     internal sealed class SettingsDialog : Form
     {
         private const string RepositoryUrl = "https://github.com/xxAkUrAxx/Student-Manager";
@@ -178,6 +195,7 @@ namespace Student_Manager
         private async void CheckUpdatesButton_Click(object sender, EventArgs e)
         {
             checkUpdatesButton.Enabled = false;
+            doneButton.Enabled = false;
             checkUpdatesButton.Text = "Checking GitHub...";
             updateStatusLabel.Text = "Contacting GitHub for the latest published release.";
             releaseLink.Visible = false;
@@ -196,6 +214,7 @@ namespace Student_Manager
             finally
             {
                 checkUpdatesButton.Enabled = true;
+                doneButton.Enabled = true;
                 checkUpdatesButton.Text = "↻   Check for updates";
             }
         }
@@ -205,39 +224,46 @@ namespace Student_Manager
             ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
             using (HttpClient client = new HttpClient())
             {
-                client.Timeout = TimeSpan.FromSeconds(12);
-                client.DefaultRequestHeaders.UserAgent.ParseAdd("Student-Manager/1.0");
+                client.Timeout = TimeSpan.FromMinutes(10);
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("Student-Manager/1.0.2");
                 HttpResponseMessage response = await client.GetAsync(LatestReleaseApiUrl);
 
                 if (response.StatusCode == HttpStatusCode.NotFound)
                 {
-                    updateStatusLabel.Text = "No published GitHub releases were found yet.";
+                    updateStatusLabel.Text = "The update service could not find a published release.";
                     releaseUrl = RepositoryUrl;
                     releaseLink.Text = "Open GitHub repository";
                     releaseLink.Visible = true;
+                    response.Dispose();
                     return;
                 }
 
                 response.EnsureSuccessStatusCode();
                 string json = await response.Content.ReadAsStringAsync();
-                Match tagMatch = Regex.Match(json, "\\\"tag_name\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
-                Match urlMatch = Regex.Match(json, "\\\"html_url\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
-                if (!tagMatch.Success)
+                response.Dispose();
+
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                GitHubReleaseInfo release = serializer.Deserialize<GitHubReleaseInfo>(json);
+                if (release == null || string.IsNullOrWhiteSpace(release.tag_name))
                 {
                     throw new InvalidOperationException("GitHub returned a release without a version tag.");
                 }
 
-                string tag = tagMatch.Groups[1].Value;
+                string tag = release.tag_name;
                 string cleanTag = tag.Trim().TrimStart('v', 'V');
                 Version currentVersion = Assembly.GetExecutingAssembly().GetName().Version;
                 Version latestVersion;
                 bool parsed = Version.TryParse(cleanTag, out latestVersion);
 
-                releaseUrl = urlMatch.Success ? urlMatch.Groups[1].Value.Replace("\\/", "/") : RepositoryUrl;
+                releaseUrl = string.IsNullOrWhiteSpace(release.html_url) ? RepositoryUrl : release.html_url;
                 if (parsed && latestVersion > currentVersion)
                 {
-                    updateStatusLabel.Text = "A newer version is available: " + tag + " (installed " + currentVersion.ToString(3) + ").";
-                    releaseLink.Text = "View update on GitHub";
+                    GitHubReleaseAsset installerAsset = FindInstallerAsset(release);
+                    ValidateInstallerAsset(installerAsset);
+
+                    updateStatusLabel.Text = "Version " + tag + " is available. Starting download...";
+                    checkUpdatesButton.Text = "Downloading update...";
+                    await DownloadAndStartInstallerAsync(client, installerAsset, cleanTag);
                 }
                 else if (parsed)
                 {
@@ -251,6 +277,113 @@ namespace Student_Manager
                 }
 
                 releaseLink.Visible = true;
+            }
+        }
+
+        private static GitHubReleaseAsset FindInstallerAsset(GitHubReleaseInfo release)
+        {
+            if (release.assets == null)
+            {
+                return null;
+            }
+
+            return release.assets.FirstOrDefault(asset =>
+                asset != null &&
+                !string.IsNullOrWhiteSpace(asset.name) &&
+                asset.name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static void ValidateInstallerAsset(GitHubReleaseAsset asset)
+        {
+            if (asset == null || string.IsNullOrWhiteSpace(asset.browser_download_url))
+            {
+                throw new InvalidOperationException("The latest release does not contain a Windows installer.");
+            }
+
+            Uri downloadUri;
+            if (!Uri.TryCreate(asset.browser_download_url, UriKind.Absolute, out downloadUri) ||
+                downloadUri.Scheme != Uri.UriSchemeHttps ||
+                !string.Equals(downloadUri.Host, "github.com", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("The release installer has an invalid download address.");
+            }
+
+            if (string.IsNullOrWhiteSpace(asset.digest) ||
+                !asset.digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) ||
+                asset.digest.Length != 71)
+            {
+                throw new InvalidOperationException("The release installer does not have a valid security checksum.");
+            }
+        }
+
+        private async Task DownloadAndStartInstallerAsync(
+            HttpClient client,
+            GitHubReleaseAsset asset,
+            string version)
+        {
+            string safeVersion = new string(version.Where(character =>
+                char.IsDigit(character) || character == '.').ToArray());
+            string installerPath = Path.Combine(
+                Path.GetTempPath(),
+                "StudentManagerUpdate-" + safeVersion + ".exe");
+
+            using (HttpResponseMessage downloadResponse = await client.GetAsync(
+                asset.browser_download_url,
+                HttpCompletionOption.ResponseHeadersRead))
+            {
+                downloadResponse.EnsureSuccessStatusCode();
+                long? totalBytes = downloadResponse.Content.Headers.ContentLength;
+
+                using (Stream downloadStream = await downloadResponse.Content.ReadAsStreamAsync())
+                using (FileStream fileStream = new FileStream(
+                    installerPath,
+                    FileMode.Create,
+                    FileAccess.Write,
+                    FileShare.None,
+                    81920,
+                    true))
+                {
+                    byte[] buffer = new byte[81920];
+                    long downloadedBytes = 0;
+                    int bytesRead;
+                    while ((bytesRead = await downloadStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                    {
+                        await fileStream.WriteAsync(buffer, 0, bytesRead);
+                        downloadedBytes += bytesRead;
+
+                        if (totalBytes.HasValue && totalBytes.Value > 0)
+                        {
+                            int percentage = (int)(downloadedBytes * 100L / totalBytes.Value);
+                            updateStatusLabel.Text = "Downloading version " + version + "... " + percentage + "%";
+                        }
+                    }
+                }
+            }
+
+            string expectedHash = asset.digest.Substring("sha256:".Length);
+            string actualHash = ComputeSha256(installerPath);
+            if (!string.Equals(expectedHash, actualHash, StringComparison.OrdinalIgnoreCase))
+            {
+                File.Delete(installerPath);
+                throw new InvalidOperationException("The downloaded installer failed its security check.");
+            }
+
+            updateStatusLabel.Text = "Download complete. Starting the installer...";
+            checkUpdatesButton.Text = "Installing update...";
+
+            Process.Start(new ProcessStartInfo(installerPath)
+            {
+                UseShellExecute = true,
+                Arguments = "/SILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NORESTARTAPPLICATIONS"
+            });
+        }
+
+        private static string ComputeSha256(string filePath)
+        {
+            using (SHA256 sha256 = SHA256.Create())
+            using (FileStream stream = File.OpenRead(filePath))
+            {
+                return BitConverter.ToString(sha256.ComputeHash(stream)).Replace("-", string.Empty);
             }
         }
 
